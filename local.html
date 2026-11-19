@@ -1,0 +1,59 @@
+<!DOCTYPE html>
+<html lang="ru"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Проба локального распознавания</title>
+<style>
+:root{--bg:#f2f5f6;--fg:#17232b;--dim:#6b7a82;--ac:#0e7a73;--pn:#e1e8ea}
+@media (prefers-color-scheme:dark){:root{--bg:#10171b;--fg:#e7eef0;--dim:#8a9aa2;--ac:#5fc4b8;--pn:#1a252a;color-scheme:dark}}
+body{margin:0;padding:16px;background:var(--bg);color:var(--fg);font:16px/1.45 system-ui,sans-serif}
+h1{font-size:19px;margin:0 0 8px}p{margin:8px 0;color:var(--dim);font-size:14px}
+button{height:52px;width:100%;margin:6px 0;border:0;border-radius:10px;background:var(--ac);color:#fff;font:600 16px system-ui}
+button:disabled{opacity:.5}
+#st{font-weight:600;margin:10px 0}#now{min-height:3em;padding:10px;background:var(--pn);border-radius:10px;font-size:19px}
+#all{margin-top:10px;font-size:15px;white-space:pre-wrap}
+textarea{width:100%;height:22vh;box-sizing:border-box;margin-top:8px;font:12px monospace;background:var(--pn);color:var(--fg);border:0;border-radius:10px;padding:8px}
+</style></head><body>
+<h1>Проба локального распознавания</h1>
+<p>Модель работает в телефоне, без интернета. Первая загрузка — 46 МБ. Положи телефон так, как он будет на сцене, и проговори питч.</p>
+<button id="go">Загрузить модель и начать</button>
+<button id="cp" disabled>Скопировать журнал</button>
+<div id="st">Не запущено</div>
+<div id="now"></div>
+<div id="all"></div>
+<textarea id="lg" readonly></textarea>
+<script src="vosk/vosk.js"></script>
+<script>
+'use strict';
+const $=s=>document.querySelector(s),LOG=[];let t0=0,on=false,ctx,stream,node,rec,nW=0,lastP='',fed=0;
+const log=(...a)=>{LOG.push(JSON.stringify([Math.round(performance.now()-t0),...a]));$('#lg').value=LOG.slice(-200).join('\n')};
+async function grammar(){   // словарь — только слова питча: так маленькая модель распознаёт заметно точнее
+ const h=await (await fetch('index.html')).text(),m=h.match(/const DEF=`([\s\S]*?)`;/);
+ const w=m[1].split('\n').filter(l=>l[0]!='#').join(' ').toLowerCase().replace(/ё/g,'е').replace(/[^а-я\s-]/g,' ').split(/[\s-]+/).filter(Boolean);
+ const ex='добрый день триста пятнадцать процентов сто тридцать пять три с половиной один эм эс два тринадцать восемь шестьдесят двадцать седьмом третьему'.split(' ');
+ return JSON.stringify([[...new Set([...w,...ex])].join(' '),'[unk]'])}
+async function model(){const parts=['vosk/model.tar.gz.00','vosk/model.tar.gz.01'],bufs=[];let got=0;
+ for(const p of parts){let r;try{const c=await caches.open('vosk-ru');r=await c.match(p);if(!r){r=await fetch(p);if(r.ok)await c.put(p,r.clone())}}catch(e){r=await fetch(p)}
+  if(!r.ok)throw new Error('не скачался '+p);const b=await r.arrayBuffer();got+=b.byteLength;bufs.push(b);$('#st').textContent='Загрузка модели: '+Math.round(got/1e6)+' МБ'}
+ return Vosk.createModel(URL.createObjectURL(new Blob(bufs)))}
+async function start(){$('#go').disabled=true;t0=performance.now();
+ try{$('#st').textContent='Загрузка модели…';const g=await grammar(),m=await model();log('model',Math.round(performance.now()-t0));
+  stream=await navigator.mediaDevices.getUserMedia({audio:{channelCount:1,echoCancellation:false,noiseSuppression:true,autoGainControl:true}});
+  const tr=stream.getAudioTracks()[0];ctx=new (window.AudioContext||window.webkitAudioContext)();
+  log('mic',tr.label,ctx.sampleRate,navigator.userAgent);
+  rec=new m.KaldiRecognizer(ctx.sampleRate,g);rec.setWords(true);
+  const tA=performance.now();
+  rec.on('partialresult',e=>{const p=e.result.partial;if(p&&p!=lastP){lastP=p;$('#now').textContent=p;log('p',p.split(' ').slice(-4).join(' '),Math.round(fed*1000))}});
+  rec.on('result',e=>{const r=e.result.result;if(!r||!r.length)return;nW+=r.filter(w=>w.word.length>1&&w.word!='[unk]').length;
+   const lag=(performance.now()-tA)/1000-r[r.length-1].end;                // на сколько результат пришёл позже, чем слово прозвучало
+   $('#all').textContent+=r.map(w=>w.word).join(' ')+'\n';log('f',r.map(w=>w.word).join(' '),+r[0].start.toFixed(1),+r[r.length-1].end.toFixed(1),+lag.toFixed(2));
+   $('#st').textContent='Слушаю · слов узнано: '+nW+' · отставание '+lag.toFixed(1)+' с'});
+  const src=ctx.createMediaStreamSource(stream);node=ctx.createScriptProcessor(4096,1,1);
+  node.onaudioprocess=e=>{if(!on)return;fed+=e.inputBuffer.duration;try{rec.acceptWaveform(e.inputBuffer)}catch(x){log('err',String(x))}};
+  src.connect(node);node.connect(ctx.destination);on=true;
+  if(navigator.wakeLock)navigator.wakeLock.request('screen').catch(()=>{});
+  $('#st').textContent='Слушаю — говори';$('#go').textContent='Стоп';$('#go').disabled=false;$('#cp').disabled=false;$('#go').onclick=stop}
+ catch(e){log('fail',String(e));$('#st').textContent='Ошибка: '+e.message;$('#go').disabled=false}}
+function stop(){on=false;try{stream.getTracks().forEach(t=>t.stop());ctx.close()}catch(e){}log('stop',nW);$('#st').textContent='Остановлено · слов узнано: '+nW;$('#go').textContent='Перезагрузи страницу для новой пробы';$('#go').disabled=true}
+$('#go').onclick=start;
+$('#cp').onclick=()=>{const t=LOG.join('\n');$('#lg').value=t;$('#lg').select();try{navigator.clipboard.writeText(t)}catch(e){document.execCommand('copy')}$('#cp').textContent='Скопировано'};
+</script></body></html>
